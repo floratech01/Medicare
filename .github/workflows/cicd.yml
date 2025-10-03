@@ -31,13 +31,16 @@ jobs:
       - name: Build Docker image
         run: docker build -t my-nginx-app:latest .
 
-      # Step 5: Tag Docker image
+      # Step 5: Tag Docker image with ECR URI
       - name: Tag Docker image
-        run: docker tag my-nginx-app:latest ${{ secrets.ECR_REPOSITORY }}:latest
+        run: |
+          IMAGE_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+          docker tag my-nginx-app:latest $IMAGE_URI
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
       # Step 6: Push Docker image to ECR
       - name: Push Docker image to ECR
-        run: docker push ${{ secrets.ECR_REPOSITORY }}:latest
+        run: docker push $IMAGE_URI
 
       # Step 7: Prepare SSH key
       - name: Prepare SSH key
@@ -50,6 +53,8 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no -i ec2_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
             set -e
+            IMAGE_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+
             # Update system
             sudo apt-get update -y
 
@@ -74,17 +79,17 @@ jobs:
             fi
 
             # Login to ECR
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REPOSITORY }}
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
 
             # Pull latest image
-            docker pull ${{ secrets.ECR_REPOSITORY }}:latest
+            docker pull $IMAGE_URI
 
             # Stop & remove old container if running
             docker stop nginx-app || true
             docker rm nginx-app || true
 
             # Run new container
-            docker run -d --name nginx-app -p 80:80 ${{ secrets.ECR_REPOSITORY }}:latest
+            docker run -d --name nginx-app -p 80:80 $IMAGE_URI
           EOF
 
       # Step 9: Health Check (verify app is running on EC2)
