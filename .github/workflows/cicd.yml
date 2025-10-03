@@ -10,9 +10,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout code
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Step 2: Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -20,42 +22,83 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # Step 3: Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Step 4: Build Docker image
       - name: Build Docker image
-        run: |
-          docker build -t my-nginx-app:latest .
+        run: docker build -t my-nginx-app:latest .
 
+      # Step 5: Tag Docker image
       - name: Tag Docker image
-        run: |
-          docker tag my-nginx-app:latest \
-            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+        run: docker tag my-nginx-app:latest ${{ secrets.ECR_REPOSITORY }}:latest
 
+      # Step 6: Push Docker image to ECR
       - name: Push Docker image to ECR
-        run: |
-          docker push \
-            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+        run: docker push ${{ secrets.ECR_REPOSITORY }}:latest
 
+      # Step 7: Prepare SSH key
       - name: Prepare SSH key
         run: |
           echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key.pem
           chmod 600 ec2_key.pem
 
+      # Step 8: Deploy on EC2
       - name: Deploy on EC2
         run: |
-          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
-              | docker login --username AWS --password-stdin \
-              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+            set -e
+            # Update system
+            sudo apt-get update -y
 
-            docker pull \
-              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+            # Install Docker if missing
+            if ! command -v docker &> /dev/null
+            then
+              echo "Installing Docker..."
+              sudo apt-get install -y docker.io
+              sudo systemctl enable docker
+              sudo systemctl start docker
+              sudo usermod -aG docker $USER
+            fi
 
+            # Install AWS CLI if missing
+            if ! command -v aws &> /dev/null
+            then
+              echo "Installing AWS CLI..."
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip
+              sudo ./aws/install
+              rm -rf awscliv2.zip aws
+            fi
+
+            # Login to ECR
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REPOSITORY }}
+
+            # Pull latest image
+            docker pull ${{ secrets.ECR_REPOSITORY }}:latest
+
+            # Stop & remove old container if running
             docker stop nginx-app || true
             docker rm nginx-app || true
-            docker run -d --name nginx-app -p 80:80 \
-              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+
+            # Run new container
+            docker run -d --name nginx-app -p 80:80 ${{ secrets.ECR_REPOSITORY }}:latest
           EOF
 
+      # Step 9: Health Check (verify app is running on EC2)
+      - name: Health Check
+        run: |
+          echo "Checking if app is running on EC2..."
+          for i in {1..10}; do
+            if curl -s --head http://${{ secrets.EC2_HOST }} | grep "200 OK" > /dev/null; then
+              echo "✅ App is live!"
+              exit 0
+            else
+              echo "⏳ Waiting for app... (attempt $i)"
+              sleep 10
+            fi
+          done
+          echo "❌ App failed health check."
+          exit 1
