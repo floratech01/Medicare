@@ -1,89 +1,49 @@
-name: ci
+name: CI/CD Pipeline to AWS ECR and EC2
 
 on:
   push:
-    branches:
-      - main
-    workflow_dispatch:
-
-env:
-  AWS_REGION: us-east_1
-  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+    branches: [main]
 
 jobs:
-  build-and-deploy-good:
+  build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      -
-        name: Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      -
-        name: Configure AWS credentials
+
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-     
-      -
-        name: debug ECR info
-        run: |
-          echo "ECR_REGISTRY: ${{ env.ECR_REGISTRY }}"
-          echo "AWS_REGION: ${{ env.AWS_REGION }}"
-          echo "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}"
-          echo "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-      
-      -
-        name: Login to ECR
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-        with:
-          region: ${{ env.AWS_REGION }}
 
-      -
-        name: build and push
-        uses: aws-actions/build-and-push-image@v2
-        with:
-          repository-name: ${{ env.ECR_REGISTRY }}
-          repository-type: public
-          file: Dockerfile
-          context: .
-          push: true
-          build-args: |
-            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            AWS_REGION=${{ env.AWS_REGION }}
+      - name: Build Docker image
+        run: |
+          docker build -t my-app:latest .
+          docker tag my-app:latest ${{ secrets.ECR_REPOSITORY }}:latest
 
-      -
-        name: copy docker file to ec2 instance
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_PRIVATE_KEY }}
-          source: Dockerfile
-          target: ~/app/Dockerfile
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ secrets.ECR_REPOSITORY }}:latest
 
-      -
-        name: deploy to ec2 instance
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_PRIVATE_KEY }}
-          script: |
-            cd app
-            docker build -t floratech01/mediplus:v3 .
-            docker run -d -p 80:80 floratech01/mediplus:v3
+      - name: Prepare SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key.pem
+          chmod 600 ec2_key.pem
 
-            if ! command -v docker &> /dev/null; then
-              echo "installing docker"
-              sudo apt-get update
-              sudo apt-get install -y docker.io
-              sudo systemctl start docker
-              sudo systemctl enable docker
-              sudo usermod -aG docker $USER
-              newgrp docker
-
-            if
-
+      - name: Deploy to EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REPOSITORY }}
+            docker pull ${{ secrets.ECR_REPOSITORY }}:latest
+            docker stop my-app || true
+            docker rm my-app || true
+            docker run -d --name my-app -p 80:80 ${{ secrets.ECR_REPOSITORY }}:latest
+          EOF
             
