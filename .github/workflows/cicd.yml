@@ -38,5 +38,7 @@ jobs:
           echo "${{secrets.SSH_KEY}}" > ssh_key.pem
           chmod 600 ssh_key.pem
           cat ssh_key.pem
+          ssh -o StrictHostKeyChecking=no -i ssh_key.pem ubuntu@54.227.70.184 "docker ps"
+          ssh -o StrictHostKeyChecking=no -i ssh_key.pem ubuntu@54.227.70.184 "hostnamectl"
       
       
